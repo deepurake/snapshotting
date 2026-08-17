@@ -10,11 +10,12 @@ set -euo pipefail
 LOG_DIR="/var/lib/cuda-checkpoints/bare-logs"
 CKPT_DIR="/var/lib/cuda-checkpoints/bare-$(date +%s)"
 LOG_FILE="$LOG_DIR/infer.log"
+FD_TEST_FILE="$LOG_DIR/fdtest"
 
 sudo mkdir -p "$LOG_DIR" "$CKPT_DIR"
-sudo rm -f "$LOG_FILE"
+sudo rm -f "$LOG_FILE" "$FD_TEST_FILE.raw" "$FD_TEST_FILE.pyfile"
 sudo touch "$LOG_FILE"
-sudo chown "$(whoami)" "$LOG_FILE"
+sudo chown "$(whoami)" "$LOG_FILE" "$LOG_DIR"
 
 wait_for() {
     local pattern="$1"
@@ -33,7 +34,7 @@ wait_for() {
 
 echo "== Cold start =="
 START_TS=$(date +%s.%N)
-setsid python3 infer.py --auto-loop --loop-interval 5 --log-file "$LOG_FILE" < /dev/null > /tmp/infer_stdout.log 2>&1 &
+setsid python3 infer.py --auto-loop --loop-interval 5 --log-file "$LOG_FILE" --fd-test-file "$FD_TEST_FILE" < /dev/null > /tmp/infer_stdout.log 2>&1 &
 PID=$!
 disown
 
@@ -48,6 +49,15 @@ echo "== Waiting for a steady-state auto-loop inference =="
 sleep 6
 tail -n1 "$LOG_FILE"
 PRE_DUMP_LINES=$(wc -l < "$LOG_FILE")
+
+echo "== FD state before dump =="
+echo "raw fd file:"
+tail -n3 "$FD_TEST_FILE.raw"
+echo "pyfile:"
+tail -n3 "$FD_TEST_FILE.pyfile"
+PRE_DUMP_RAW_LINES=$(wc -l < "$FD_TEST_FILE.raw")
+PRE_DUMP_LAST_COUNTER=$(tail -n1 "$FD_TEST_FILE.raw" | awk '{print $2}')
+grep FD_CHECK "$LOG_FILE" | tail -n1
 
 echo "== Locking GPU state (cuda-checkpoint) =="
 sudo cuda-checkpoint --toggle --pid "$PID"
@@ -68,13 +78,26 @@ fi
 sleep 2
 
 echo "== Restoring process from disk with criu =="
+sudo rm -f /tmp/bare_restored.pid
 RESTORE_START=$(date +%s.%N)
 sudo criu restore --images-dir "$CKPT_DIR" --shell-job --tcp-established --restore-detached --pidfile /tmp/bare_restored.pid -L /usr/local/lib/criu
 RESTORE_PID=$(sudo cat /tmp/bare_restored.pid)
 echo "Restored PID: $RESTORE_PID"
 
 echo "== Unlocking GPU state (cuda-checkpoint) =="
-sudo cuda-checkpoint --toggle --pid "$RESTORE_PID"
+# A toggle issued immediately after criu restore returns can race with the
+# driver's own restore bookkeeping and silently no-op (process comes back
+# alive but every thread blocks on CUDA calls, state stuck at
+# "checkpointed"). Verify and retry rather than trusting a single call.
+for i in $(seq 1 10); do
+    sudo cuda-checkpoint --toggle --pid "$RESTORE_PID"
+    sleep 0.5
+    STATE=$(sudo cuda-checkpoint --get-state --pid "$RESTORE_PID")
+    if [ "$STATE" = "running" ]; then
+        break
+    fi
+    echo "toggle didn't take effect yet (state=$STATE), retrying..."
+done
 RESTORE_END=$(date +%s.%N)
 RESTORE_S=$(echo "$RESTORE_END - $RESTORE_START" | bc)
 echo "Restore took ${RESTORE_S}s"
@@ -88,6 +111,25 @@ for i in $(seq 1 20); do
     sleep 1
 done
 tail -n3 "$LOG_FILE"
+
+echo "== FD state after restore =="
+echo "raw fd file:"
+tail -n3 "$FD_TEST_FILE.raw"
+echo "pyfile:"
+tail -n3 "$FD_TEST_FILE.pyfile"
+POST_RESTORE_RAW_LINES=$(wc -l < "$FD_TEST_FILE.raw")
+POST_RESTORE_LAST_COUNTER=$(tail -n1 "$FD_TEST_FILE.raw" | awk '{print $2}')
+grep FD_CHECK "$LOG_FILE" | tail -n1
+
+echo
+echo "== FD survival check =="
+echo "raw fd line count: $PRE_DUMP_RAW_LINES (pre-dump) -> $POST_RESTORE_RAW_LINES (post-restore)"
+echo "raw fd last counter: $PRE_DUMP_LAST_COUNTER (pre-dump) -> $POST_RESTORE_LAST_COUNTER (post-restore)"
+if (( POST_RESTORE_RAW_LINES > PRE_DUMP_RAW_LINES )) && (( POST_RESTORE_LAST_COUNTER > PRE_DUMP_LAST_COUNTER )); then
+    echo "PASS: raw fd, pyfile, and pipe all continued correctly across kill+restore (no reset, no truncation)"
+else
+    echo "FAIL: fd state did not continue as expected across kill+restore"
+fi
 
 echo
 echo "== Summary =="

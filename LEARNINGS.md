@@ -135,6 +135,28 @@ Issues hit and fixed, in order:
    mount-tree error (a different bug from the segfault, but worth
    revisiting given how wrong our criu version turned out to be).
 
+## Stress test: open file descriptors across kill+restore
+
+To check the checkpoint captures more than just CUDA/model state, extended
+`infer.py` (`--fd-test-file`) to hold open, and exercise every loop
+iteration: a raw OS-level fd (`os.open`), a buffered Python file object, and
+a self-connected pipe (write on one end, read back on the other, in the same
+process).
+
+Result: **all three survive a full kill+restore correctly.** Counters
+resumed exactly where they left off (`0,1,2` pre-dump -> `3,4,5,6,7`
+post-restore, no reset/truncation/duplication), the raw fd kept the same
+fd number, and the pipe's read/write ends stayed connected to each other
+across the process actually being killed and recreated.
+
+Found one real gotcha along the way: calling `cuda-checkpoint --toggle` to
+resume CUDA **immediately** after `criu restore` returns can race with the
+driver's own restore bookkeeping and silently no-op -- the process comes
+back alive (visible in `ps`, correct thread count) but every thread blocks
+on CUDA calls forever, state stuck at `checkpointed`. `bare_criu_benchmark.sh`
+now verifies state after toggling and retries (with a short sleep) instead
+of trusting a single call.
+
 ## Other gotchas hit along the way (unrelated to the core investigation)
 
 - `pkill -f infer.py` matches its own command-line argv (the string
