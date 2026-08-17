@@ -33,7 +33,7 @@ wait_for() {
 
 echo "== Cold start =="
 START_TS=$(date +%s.%N)
-setsid python3 infer.py --auto-loop --loop-interval 5 --log-file "$LOG_FILE" < /dev/null &
+setsid python3 infer.py --auto-loop --loop-interval 5 --log-file "$LOG_FILE" < /dev/null > /tmp/infer_stdout.log 2>&1 &
 PID=$!
 disown
 
@@ -54,7 +54,7 @@ sudo cuda-checkpoint --toggle --pid "$PID"
 
 echo "== Dumping process to disk with criu (this kills it) =="
 DUMP_START=$(date +%s.%N)
-sudo criu dump --tree "$PID" --images-dir "$CKPT_DIR" --shell-job --tcp-established
+sudo criu dump --tree "$PID" --images-dir "$CKPT_DIR" --shell-job --tcp-established -L /usr/local/lib/criu
 DUMP_END=$(date +%s.%N)
 echo "Dump took $(echo "$DUMP_END - $DUMP_START" | bc)s, images in $CKPT_DIR"
 sudo du -sh "$CKPT_DIR"
@@ -69,7 +69,7 @@ sleep 2
 
 echo "== Restoring process from disk with criu =="
 RESTORE_START=$(date +%s.%N)
-sudo criu restore --images-dir "$CKPT_DIR" --shell-job --tcp-established --restore-detached --pidfile /tmp/bare_restored.pid
+sudo criu restore --images-dir "$CKPT_DIR" --shell-job --tcp-established --restore-detached --pidfile /tmp/bare_restored.pid -L /usr/local/lib/criu
 RESTORE_PID=$(sudo cat /tmp/bare_restored.pid)
 echo "Restored PID: $RESTORE_PID"
 

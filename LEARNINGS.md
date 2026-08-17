@@ -96,15 +96,44 @@ Issues hit and fixed, in order:
    from the SSH session's pipes; the counter.cu test used fully clean fds
    -- `< /dev/null > counter.log 2>&1` -- and still segfaulted identically).
 
-   **Conclusion: this is a genuine environment incompatibility**, not
-   something fixable via our scripts or flags. `criu` 3.16.1 cannot
-   correctly restore *any* CUDA process (not just complex/multithreaded
-   ones) on this driver (580.173.02) + kernel (5.15.0-143-generic)
-   combination. Since even NVIDIA's own official minimal example fails the
-   same way, further progress would require a different criu build/version
-   (ideally one NVIDIA has specifically validated against this driver) or a
-   different kernel/driver pairing -- not something to chase further in
-   this session.
+   **Root cause found and fixed: `criu` needed to be upgraded to >= 4.0.**
+   NVIDIA's README states plainly (in the driver-570 feature list):
+   "integration with CRIU 4.0 or higher, providing process tree support."
+   Ubuntu 22.04's apt package is 3.16.1 -- below that bar, and missing a
+   dedicated `cuda_plugin.so` entirely (confirmed: building criu 4.2.1 from
+   source produces `plugins/cuda/cuda_plugin.so`, which 3.16.1 has no
+   equivalent of).
+
+   Built criu v4.2.1 from source (`git clone --branch v4.2.1
+   https://github.com/checkpoint-restore/criu.git`; needed `apt build-dep
+   criu` after enabling deb-src, plus `libaio-dev`, `python3-yaml`, and
+   `uuid-dev` which weren't pulled in automatically). Installed to
+   `/usr/local/sbin/criu`, with the cuda plugin at
+   `/usr/local/lib/criu/cuda_plugin.so` (not the default `/var/lib/criu/`
+   -- pass `-L /usr/local/lib/criu` explicitly).
+
+   Re-ran NVIDIA's `counter.cu` reference example with criu 4.2.1: **dump
+   and restore both succeed**, GPU state resumes correctly, and the
+   restored process continues incrementing its GPU counter exactly where
+   it left off. Re-ran the full bare-process benchmark with our actual
+   PyTorch inference process:
+
+   | Stage | Time |
+   |---|---|
+   | Cold start | 6.06s |
+   | CRIU dump + restore (full process kill, restored from 3.1GB on-disk checkpoint) | **2.09s** |
+
+   ~2.9x faster than cold start, with identical inference output
+   before/after -- confirming both GPU and CPU/process memory (including
+   model weights) survive a genuine kill + resurrection via `bare_criu_benchmark.sh`.
+   Smaller speedup than the in-place suspend/resume (20x, PR #1) since this
+   involves actually serializing/deserializing a 3.1GB image to/from disk,
+   but it's the scenario that matters for "kill the pod and restore from a
+   checkpoint" rather than "pause a still-alive process."
+
+   Not yet retried: whether upgrading criu also fixes the *container* path's
+   mount-tree error (a different bug from the segfault, but worth
+   revisiting given how wrong our criu version turned out to be).
 
 ## Other gotchas hit along the way (unrelated to the core investigation)
 
