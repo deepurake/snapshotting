@@ -1,3 +1,5 @@
+import argparse
+import os
 import sys
 import time
 
@@ -25,6 +27,29 @@ def run_inference(model, tokenizer, device):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--auto-loop",
+        action="store_true",
+        help="Run inference repeatedly on a timer instead of reading commands "
+        "from stdin. Used for the container/CRIU test, where a stdin pipe "
+        "isn't reliable across a process dump+restore.",
+    )
+    parser.add_argument("--loop-interval", type=float, default=5.0)
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help="Write status lines to this file instead of stdout. Used in the "
+        "container/CRIU test so output doesn't depend on a stdio pipe "
+        "surviving a process dump+restore.",
+    )
+    args = parser.parse_args()
+
+    out = open(args.log_file, "a", buffering=1) if args.log_file else sys.stdout
+
+    def log(msg):
+        print(msg, file=out, flush=True)
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -34,15 +59,21 @@ def main():
     # Warmup inference so CUDA kernels/context are fully initialized before
     # we report readiness -- this is the moment cuda-checkpoint cares about.
     warmup_elapsed, _ = run_inference(model, tokenizer, device)
-    print(f"READY pid={__import__('os').getpid()} warmup_s={warmup_elapsed:.3f}", flush=True)
+    log(f"READY pid={os.getpid()} warmup_s={warmup_elapsed:.3f}")
 
-    for line in sys.stdin:
-        cmd = line.strip()
-        if cmd == "infer":
+    if args.auto_loop:
+        while True:
             elapsed, text = run_inference(model, tokenizer, device)
-            print(f"INFER_DONE elapsed_s={elapsed:.3f} text={text!r}", flush=True)
-        elif cmd == "exit":
-            break
+            log(f"INFER_DONE elapsed_s={elapsed:.3f} text={text!r}")
+            time.sleep(args.loop_interval)
+    else:
+        for line in sys.stdin:
+            cmd = line.strip()
+            if cmd == "infer":
+                elapsed, text = run_inference(model, tokenizer, device)
+                log(f"INFER_DONE elapsed_s={elapsed:.3f} text={text!r}")
+            elif cmd == "exit":
+                break
 
 
 if __name__ == "__main__":
