@@ -85,14 +85,26 @@ Issues hit and fixed, in order:
    - General criu fragility with heavily multithreaded processes,
      independent of CUDA.
 
-   Currently isolating which by building and testing NVIDIA's own reference
-   example (`cuda-checkpoint` repo's `src/counter.cu` + `example.sh`, a
-   minimal CUDA program, officially documented to work with this exact
-   `cuda-checkpoint` + `criu dump`/`criu restore` sequence). If NVIDIA's
-   own minimal example restores cleanly on this same instance, the problem
-   is specific to PyTorch's thread complexity, not the environment. If it
-   also segfaults, it's environment-level (criu/driver version
-   incompatibility) and not something fixable via configuration here.
+   Isolated by building and testing NVIDIA's own reference example
+   (`cuda-checkpoint` repo's `src/counter.cu` + `example.sh`, a minimal
+   CUDA program with no threads, no Python, no PyTorch): **it segfaults on
+   restore too**, with the identical `killed by signal 11` error, following
+   NVIDIA's own documented `cuda-checkpoint --toggle` -> `criu dump` ->
+   `criu restore` -> `cuda-checkpoint --toggle` sequence exactly. This also
+   ruled out a suspected file-descriptor cause (an earlier version of
+   `bare_criu_benchmark.sh` didn't redirect `infer.py`'s stdout/stderr away
+   from the SSH session's pipes; the counter.cu test used fully clean fds
+   -- `< /dev/null > counter.log 2>&1` -- and still segfaulted identically).
+
+   **Conclusion: this is a genuine environment incompatibility**, not
+   something fixable via our scripts or flags. `criu` 3.16.1 cannot
+   correctly restore *any* CUDA process (not just complex/multithreaded
+   ones) on this driver (580.173.02) + kernel (5.15.0-143-generic)
+   combination. Since even NVIDIA's own official minimal example fails the
+   same way, further progress would require a different criu build/version
+   (ideally one NVIDIA has specifically validated against this driver) or a
+   different kernel/driver pairing -- not something to chase further in
+   this session.
 
 ## Other gotchas hit along the way (unrelated to the core investigation)
 
