@@ -54,6 +54,25 @@ echo "== Host PID of container's main process =="
 PID=$(sudo docker inspect -f '{{.State.Pid}}' "$CONTAINER")
 echo "PID: $PID"
 
+# nvidia-container-toolkit and Docker both bind-mount individual host files
+# into the container (driver libs/binaries, /etc/hosts, /etc/hostname,
+# /etc/resolv.conf, our -v log volume, ...) rather than baking them into the
+# container's own overlay rootfs, so CRIU can't dump them as normal mounts --
+# each one must be declared external. There are 50+ of these thanks to the
+# NVIDIA driver file injection, so we generate the flags instead of hand
+# listing them.
+mapfile -t EXTERNAL_MOUNTS_DUMP_RAW < <(sudo python3 gen_external_mounts.py "$PID" dump)
+mapfile -t EXTERNAL_MOUNTS_RESTORE_RAW < <(sudo python3 gen_external_mounts.py "$PID" restore)
+EXTERNAL_MOUNTS_DUMP=()
+for m in "${EXTERNAL_MOUNTS_DUMP_RAW[@]}"; do
+    EXTERNAL_MOUNTS_DUMP+=(--external "$m")
+done
+EXTERNAL_MOUNTS_RESTORE=()
+for m in "${EXTERNAL_MOUNTS_RESTORE_RAW[@]}"; do
+    EXTERNAL_MOUNTS_RESTORE+=(--external "$m")
+done
+echo "Declared ${#EXTERNAL_MOUNTS_DUMP_RAW[@]} external mounts"
+
 echo "== Waiting for a steady-state auto-loop inference =="
 sleep 6
 sudo tail -n1 "$LOG_FILE"
@@ -64,7 +83,7 @@ sudo cuda-checkpoint --toggle --pid "$PID"
 
 echo "== Dumping process to disk with criu (this kills it) =="
 DUMP_START=$(date +%s.%N)
-sudo criu dump --tree "$PID" --images-dir "$CKPT_DIR"
+sudo criu dump --tree "$PID" --images-dir "$CKPT_DIR" "${EXTERNAL_MOUNTS_DUMP[@]}"
 DUMP_END=$(date +%s.%N)
 echo "Dump took $(echo "$DUMP_END - $DUMP_START" | bc)s, images in $CKPT_DIR"
 
@@ -78,7 +97,7 @@ sleep 2
 
 echo "== Restoring process from disk with criu =="
 RESTORE_START=$(date +%s.%N)
-sudo criu restore --images-dir "$CKPT_DIR" --restore-detached --pidfile /tmp/restored.pid
+sudo criu restore --images-dir "$CKPT_DIR" --restore-detached --pidfile /tmp/restored.pid "${EXTERNAL_MOUNTS_RESTORE[@]}"
 RESTORE_PID=$(sudo cat /tmp/restored.pid)
 echo "Restored PID: $RESTORE_PID"
 
